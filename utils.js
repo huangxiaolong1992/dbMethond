@@ -103,7 +103,7 @@ class DbOperate {
 
 
 async function pageQuery (...parameter) {
-
+    
     var collection = parameter[0],
 
         params = parameter[1],
@@ -149,7 +149,7 @@ async function pageQuery (...parameter) {
                 result    : doc
             }
         }
-
+        
         callback({
             res : data
         });
@@ -185,19 +185,13 @@ class RedisOperate extends DbOperate {
         this.callback = callback || function () {};
     }
 
-    doErr () {
-        super.doErr();
-    }
-
     async expireTime () {
-
-        //设置过期时间和判断是否设置过期机制
+        //设置过期时间和判断是否设置过期机制  
         
         this.expire ? this.client.expire(this.key, this.expire) : "";
     }
 
-    async hmset () {
-    
+    async hmset () {  
         //判断 redisParam 过来是否为对象，是的话，就进行redis存储，否则抛出异常
         
         if(this.redisParam.constructor === Object){
@@ -238,12 +232,23 @@ class RedisOperate extends DbOperate {
                     if(res.code == 200){
          
                         this.client.zrem(this.key, JSON.stringify(v.result[0]), 0 , -1, (err, result)=>{
+                            //如果缓存删除失败，为降低脏数据的存在性，回过头去增加Mongodb对应的数据 
+                            if(err) {
 
-                            if(err)  return this.callback(super.doErr(err)); 
+                                this.addCache(this.collection , this.params).then((v)=>{
+                                    
+                                    this.callback(v);
+                                });
+
+                            }else{
+
+                                this.callback(v);
+                            } 
                               
-                        });
-
-                        this.callback(v);
+                        });         
+                    }else{
+                      
+                       this.callback(super.doErr(res));
                     }
                 });
                               
@@ -258,33 +263,52 @@ class RedisOperate extends DbOperate {
             if(v.code == 200){
        
                 this.client.zadd(this.key, new Date().getTime(), JSON.stringify(v.result), (err, result)=>{
-                    
-                    if(err) return this.callback(super.doErr(err));
+
+                    if(err) {
+                        //如果缓存添加失败，为降低脏数据的存在性，回过头去删除Mongodb对应的数据
+                        this.removeCache(this.collection , this.params).then((v)=>{
+
+                            this.callback(v);
+                        });
+                       
+                    }else{
+
+                        this.callback(v);
+                    }
                       
                 });
-            }
+            }else{
 
-            this.callback(v);
+                this.callback(super.doErr(v));
+            }
         })
     }
 
     async updateCache () {
 
         this.query(this.collection , this.params).then((v)=>{
-            
+
             if(v.code == 200){
                  
                 this.update(this.collection , this.params , this.updateData).then((res)=>{
           
                     if(res.code == 200){
-         
+
                         this.client.zrem(this.key, JSON.stringify(v.result[0]), 0 , -1, (err, result)=>{
                          
-                            if(err) return this.callback(super.doErr(err)); 
-                              
-                        });
+                            if(err) {
+                                
+                            }else{
 
-                        this.callback(v);
+                                this.client.zadd(this.key, new Date().getTime(), JSON.stringify(this.updateData), (err, result)=>{
+
+                                    this.callback(v);
+                                })
+                            }        
+                        });
+                    }else{
+
+                         this.callback(super.doErr(res));
                     }
                 });                
             } 
@@ -328,23 +352,32 @@ function redisPageQuery(...parameter) {
     
     //参数不存在，即赋值{}，查询所有
     var params = !params ? {} : params;
+    
+
+    //统一处理错误信息
+    let doErr = () => {
+        var data = {
+            code   : 500,
+            msg    : "查询失败"
+        }
+
+        callback(data);
+    }
        
     client.zcard( key, (err,result)=>{
+
         if(err){
-            var data = {
-                code   : 500,
-                msg    : "查询失败",
-                result : err
-            }
+            
+            doErr();
+
         }else{
            
             let len = result,
                     
                 n = Math.ceil(len / rows);  //总共多少页
+            //不等於 0 代表key在redis已经存在
+            if(result != 0){
 
-           //不等於 0 代表key在redis已经存在
-           if(result != 0){
-     
                 let args = [ key , '-inf',  '+inf',  'limit', start , stop ];
 
                 client.zrangebyscore(args, (err,res)=>{
@@ -372,36 +405,52 @@ function redisPageQuery(...parameter) {
 
            }else{
               //不存在，就去调用DbOperate查询 去mongodb 里查询，然后返回给前端,并且同步存储redis
-             
                 pageQuery(collection, params , index, rows, sort,    
                  (result)=>{
-                               
-                    callback(result);   
-                })
-                    
-                new DbOperate(enforcementDetail, params).query().then((v)=>{
 
-                    let vResult = v.result ;
+                    if(result.res.code == 200){
 
-                     //for(let i = vResult.length - 1 ; i >= 0  ; i--){
-                    for(let i = 0 ; i < vResult.length  ; i++){
+                        new DbOperate(enforcementDetail, params).query().then((v)=>{
+                            
+                            if(v.code == 200){
 
-                        client.zadd( key, new Date().getTime(), JSON.stringify(vResult[i]) , (error,result)=>{
+                                let vResult = v.result ;
 
-                            if(error){
+                                let queue = [];
 
-                                console.log(`-----------------数据在存入redis中的错误：${error}--------------------`);
+                                for(let i = 0 ; i < vResult.length  ; i++){
+
+                                    let time = new Date().getTime();
+
+                                    queue.push(time , JSON.stringify(vResult[i]));  
+                                   
+                                } 
+
+                                client.zadd( key, queue ,(error,res)=>{
+
+                                    if(error){
+
+                                        console.log(`-----------------数据在存入redis中的错误：${error}--------------------`);
+                                    }else{
+
+                                        callback(result); 
+                                    }
+                                   
+                                });  
+
+                                //设置过期时间和判断是否设置过期机制
+                                expireTime ?  client.expire(key, expireTime) : "";   
+                            
                             }else{
+                                doErr();
+                            }    
+                                   
+                        }) 
+                    }else{
 
-                                console.log(`-----------------数据在存入redis中的结果：${vResult}--------------------`);
-                            }
-                           
-                        });
-                    }   
-                    
-                    //设置过期时间和判断是否设置过期机制
-                    expireTime ?  client.expire(key, expireTime) : "";            
-                })
+                        doErr();
+                    } 
+                }) 
            }   
         }
    })
@@ -413,7 +462,6 @@ module.exports = {
     pageQuery      : pageQuery,
     RedisOperate   : RedisOperate,
     redisPageQuery : redisPageQuery
-
 }
 
 
