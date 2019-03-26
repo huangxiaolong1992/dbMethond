@@ -7,6 +7,7 @@
  *  @method create 新增
  *  @method delete 删除
  *  @method doErr 统一处理错误信息
+ *  @method doSuccess 统一处理成功信息
  *  @return 
 */
 
@@ -24,70 +25,59 @@ class DbOperate {
             result : err
         }
 
-        return errMsg ; 
+        return errMsg; 
     } 
+
+    doSuccess (successMsg, res) {
+        let sucMsg = {
+            code : 200,
+            msg : successMsg,
+            result : res
+        }
+
+        return sucMsg;
+    }
 
     async query () { 
         let result = await this.collection.find(this.params);
-        
+
         try{
-            return {
-                code : 200,
-                msg : "查询成功",
-                result : result
-            }
+            return this.doSuccess("查询成功", result);
         }
         catch(err){
-            return {
-                code : 500,
-                msg: err
-            }
+            return this.doErr(err);
         }    
     }
 
     async create () {
         let result  = await this.collection.create(this.params);
+
         try{
-            return {
-                code    :  200,
-                msg     :  "创建成功",
-                result  :  result
-            }
+            return this.doSuccess("创建成功", result);
         }
         catch(err){
-
             return this.doErr(err);
         } 
     }
 
     async delete () {
         let result = await this.collection.remove(this.params);
-        
+
         try{
-            return {
-                code    : 200,
-                msg     : "删除成功",
-                result  :  result
-            }
+            return this.doSuccess("删除成功", result);
         }
         catch(err){
-
             return this.doErr(err);
         } 
     }
 
-    async update () {
-        
+    async update () {     
         let result = await this.collection.update(this.params,this.updateData);
 
         try{
-            return {
-                code : 200,
-                msg : "更新成功"
-            }
+            return this.doSuccess("更新成功", result);
         }
         catch(err){
-
             return this.doErr(err);
         } 
     }
@@ -377,11 +367,11 @@ function redisPageQuery(...parameter) {
                 n = Math.ceil(len / rows);  //总共多少页
             //不等於 0 代表key在redis已经存在
             if(result != 0){
+                
+                let getSort = Object.values(sort).join(" ");
+                
 
-                let args = [ key , '-inf',  '+inf',  'limit', start , stop ];
-
-                client.zrangebyscore(args, (err,res)=>{
-                    
+                let sortResult = (res)=> {
                     for(let i = 0 , len = res.length ; i < len ; i++ ){
 
                         res[i] = JSON.parse(res[i]);
@@ -400,8 +390,26 @@ function redisPageQuery(...parameter) {
                     callback({
                         res : data
                     });
-     
-                })
+                }
+
+                //1为升序，-1为降序
+                if(getSort == 1){
+
+                    let args = [ key , '-inf',  '+inf',  'limit', start , stop ];
+
+                    client.zrangebyscore(args, (err,res)=>{
+                        
+                        sortResult(res);   
+                    })
+                }else{
+
+                    let args = [ key , '+inf',  '-inf',  'limit', start , stop ];
+
+                    client.zrevrangebyscore(args, (err,res)=>{
+                        
+                        sortResult(res);;
+                    })
+                }
 
            }else{
               //不存在，就去调用DbOperate查询 去mongodb 里查询，然后返回给前端,并且同步存储redis
@@ -422,22 +430,21 @@ function redisPageQuery(...parameter) {
 
                                     let time = new Date().getTime();
 
-                                    queue.push(time , JSON.stringify(vResult[i]));  
-                                   
+                                    queue.push(time , JSON.stringify(vResult[i]));         
                                 } 
+                                 
+                                let zdd = () => {
+                                    client.zadd( key, queue ,(error,res)=>{
+                                        if(error){                                          
+                                            zdd();                 
+                                        }else{
+                                            callback(result); 
+                                        }                                  
+                                    });  
+                                }
 
-                                client.zadd( key, queue ,(error,res)=>{
-
-                                    if(error){
-
-                                        console.log(`-----------------数据在存入redis中的错误：${error}--------------------`);
-                                    }else{
-
-                                        callback(result); 
-                                    }
-                                   
-                                });  
-
+                                zdd();
+ 
                                 //设置过期时间和判断是否设置过期机制
                                 expireTime ?  client.expire(key, expireTime) : "";   
                             
